@@ -59,6 +59,12 @@ SpectrumSimulator::Scenario SpectrumSimulator::scenario() const
  * 2. 根据场景添加对应的信号分量
  * 3. 组装频谱帧结构并返回
  * 
+ * 模拟信号特征基于实际无人机通信技术：
+ * - 遥控链路：GFSK调制，窄带（2MHz），跳频扩频
+ * - 图传链路：OFDM调制，宽带（20MHz），多载波特征
+ * - 数传链路：GFSK/LoRa，窄带（<1MHz）
+ * - 跳频链路：多频点快速切换（50跳/秒）
+ * 
  * @return SpectrumFrame 频谱帧数据
  */
 SpectrumFrame SpectrumSimulator::nextFrame()
@@ -71,43 +77,55 @@ SpectrumFrame SpectrumSimulator::nextFrame()
 
     // 3. 根据当前场景添加特定信号分量
     QString name;
+    const double freqStep = m_spanMHz / (double)(m_binCount - 1);
+    
     switch (m_scenario) {
     case IdleNoise:
-        // 空闲场景：仅底噪，不添加额外信号
         name = QStringLiteral("环境底噪");
         break;
         
-    case DroneControl:
-        // 遥控链路场景：窄带持续信号
+    case DroneControl: {
         name = QStringLiteral("无人机遥控窄带链路");
-        // 主信号：带小幅正弦摆动的高斯峰，模拟遥控信号的多普勒频移或调制特性
-        addGaussianSignal(bins, m_binCount * 0.42 + 8.0 * qSin(m_timeSec * 1.3), 5.0, -48.0f);
-        // 副信号：固定位置的高斯峰，模拟遥控链路的辅助通道
-        addGaussianSignal(bins, m_binCount * 0.61, 3.0, -55.0f);
-        break;
+        const double ctrlCenter = m_centerFreqMHz;
+        const double ctrlSpan = 2.0;
+        const int ctrlBin = (int)((ctrlCenter - (m_centerFreqMHz - m_spanMHz/2.0)) / freqStep);
         
-    case DroneVideo:
-        // 图传链路场景：宽带平台信号
-        name = QStringLiteral("无人机图传宽带链路");
-        // 主信号：宽带平顶信号，模拟视频传输的高带宽特性
-        addFlatSignal(bins, m_binCount * 0.50 + 14.0 * qSin(m_timeSec * 0.5), 70.0, -50.0f);
-        // 副信号：叠加在平顶上的高斯峰，模拟图传信号的载波分量
-        addGaussianSignal(bins, m_binCount * 0.50, 35.0, -54.0f);
+        addGFSKSignal(bins, ctrlBin, ctrlSpan / freqStep, -45.0f);
+        addGFSKSignal(bins, ctrlBin + 15, ctrlSpan / freqStep * 0.6, -52.0f);
         break;
+    }
+        
+    case DroneVideo: {
+        name = QStringLiteral("无人机图传宽带链路");
+        const double videoCenter = m_centerFreqMHz;
+        const double videoSpan = 20.0;
+        const int videoBin = (int)((videoCenter - (m_centerFreqMHz - m_spanMHz/2.0)) / freqStep);
+        
+        addOFDMFrame(bins, videoBin, videoSpan / freqStep, -48.0f);
+        break;
+    }
         
     case FrequencyHopping: {
-        // 跳频链路场景：多个频点间快速切换
         name = QStringLiteral("无人机跳频链路");
-        // 预设6个跳频频点位置
-        const int hopBins[] = {90, 145, 210, 270, 330, 405};
-        // 每0.2秒切换一次跳频位置（10Hz采样率，每2帧切换）
-        if (((int)(m_timeSec * 10.0)) % 2 == 0) {
-            m_hopIndex = (m_hopIndex + 1) % 6;
+        const double hopRange = 50.0;
+        const double hopStart = m_centerFreqMHz - hopRange / 2.0;
+        
+        const int hopCount = 8;
+        const double hopSpacing = hopRange / (double)(hopCount - 1);
+        
+        if (((int)(m_timeSec * 50.0)) % 2 == 0) {
+            m_hopIndex = (m_hopIndex + 1) % hopCount;
         }
-        // 当前跳频点主信号
-        addGaussianSignal(bins, hopBins[m_hopIndex], 4.0, -45.0f);
-        // 前一个跳频点的残留信号（模拟切换延迟）
-        addGaussianSignal(bins, hopBins[(m_hopIndex + 2) % 6], 3.0, -58.0f);
+        
+        const double currentHopFreq = hopStart + m_hopIndex * hopSpacing;
+        const int currentHopBin = (int)((currentHopFreq - (m_centerFreqMHz - m_spanMHz/2.0)) / freqStep);
+        
+        addGFSKSignal(bins, currentHopBin, 2.0 / freqStep, -42.0f);
+        
+        const int prevHopIndex = (m_hopIndex + hopCount - 1) % hopCount;
+        const double prevHopFreq = hopStart + prevHopIndex * hopSpacing;
+        const int prevHopBin = (int)((prevHopFreq - (m_centerFreqMHz - m_spanMHz/2.0)) / freqStep);
+        addGFSKSignal(bins, prevHopBin, 2.0 / freqStep, -60.0f);
         break;
     }
     }
@@ -149,10 +167,65 @@ double SpectrumSimulator::binToFreqMHz(int bin) const
     if (m_binCount <= 1) {
         return m_centerFreqMHz;
     }
-    // 计算起始频率（中心频率减去半带宽）
     const double startMHz = m_centerFreqMHz - m_spanMHz / 2.0;
-    // 线性插值计算当前频点对应的频率
     return startMHz + (double)bin * m_spanMHz / (double)(m_binCount - 1);
+}
+
+void SpectrumSimulator::setCenterFreqMHz(double centerFreqMHz)
+{
+    const double startMHz = m_centerFreqMHz - m_spanMHz / 2.0;
+    const double endMHz = m_centerFreqMHz + m_spanMHz / 2.0;
+    
+    if (centerFreqMHz - m_spanMHz / 2.0 < 500.0) {
+        m_centerFreqMHz = 500.0 + m_spanMHz / 2.0;
+    } else if (centerFreqMHz + m_spanMHz / 2.0 > 6000.0) {
+        m_centerFreqMHz = 6000.0 - m_spanMHz / 2.0;
+    } else {
+        m_centerFreqMHz = centerFreqMHz;
+    }
+}
+
+double SpectrumSimulator::centerFreqMHz() const
+{
+    return m_centerFreqMHz;
+}
+
+void SpectrumSimulator::setSpanMHz(double spanMHz)
+{
+    const double minSpan = 1.0;
+    const double maxSpan = 5500.0;
+    m_spanMHz = qBound(minSpan, spanMHz, maxSpan);
+    
+    const double endMHz = m_centerFreqMHz + m_spanMHz / 2.0;
+    if (endMHz > 6000.0) {
+        m_centerFreqMHz = 6000.0 - m_spanMHz / 2.0;
+    }
+    
+    const double startMHz = m_centerFreqMHz - m_spanMHz / 2.0;
+    if (startMHz < 500.0) {
+        m_centerFreqMHz = 500.0 + m_spanMHz / 2.0;
+    }
+}
+
+double SpectrumSimulator::spanMHz() const
+{
+    return m_spanMHz;
+}
+
+void SpectrumSimulator::setStartFreqMHz(double startFreqMHz)
+{
+    const double clampedStart = qBound(500.0, startFreqMHz, 6000.0 - m_spanMHz);
+    m_centerFreqMHz = clampedStart + m_spanMHz / 2.0;
+}
+
+double SpectrumSimulator::startFreqMHz() const
+{
+    return m_centerFreqMHz - m_spanMHz / 2.0;
+}
+
+double SpectrumSimulator::endFreqMHz() const
+{
+    return m_centerFreqMHz + m_spanMHz / 2.0;
 }
 
 /**
@@ -190,18 +263,81 @@ void SpectrumSimulator::addNoise(QVector<float> &bins) const
  */
 void SpectrumSimulator::addGaussianSignal(QVector<float> &bins, double centerBin, double widthBins, float peakDbm) const
 {
-    // 计算标准差（sigma），确保带宽参数合理
     const double sigma = qMax(1.0, widthBins);
     
     for (int i = 0; i < bins.size(); ++i) {
-        // 计算当前频点相对于中心的归一化距离
         const double d = ((double)i - centerBin) / sigma;
-        // 高斯函数形状因子（0到1之间）
         const float shape = (float)qExp(-0.5 * d * d);
-        // 计算信号值（叠加在-95dBm基底上）
         const float value = -95.0f + (peakDbm + 95.0f) * shape;
-        // 取最大值（信号不能低于已有噪声），并添加小幅随机波动
         bins[i] = qMax(bins[i], value + randomFloat(-1.2f, 1.2f));
+    }
+}
+
+/**
+ * @brief 添加GFSK调制信号
+ * 
+ * 模拟高斯频移键控（GFSK）信号的频谱特征：
+ * - 高斯脉冲成形导致频谱平滑滚降
+ * - 调制指数约0.5-1.0，频谱主瓣较窄
+ * - 旁瓣衰减快，符合实际遥控信号特征
+ * 
+ * GFSK是无人机遥控器最常用的调制方式（如2.4GHz频段）。
+ * 
+ * @param bins 频谱数据数组（输入/输出）
+ * @param centerBin 信号中心频点位置
+ * @param widthBins 信号带宽（以频点为单位）
+ * @param peakDbm 信号峰值功率（dBm）
+ */
+void SpectrumSimulator::addGFSKSignal(QVector<float> &bins, double centerBin, double widthBins, float peakDbm) const
+{
+    const double sigma = widthBins / 2.5;
+    
+    for (int i = 0; i < bins.size(); ++i) {
+        const double d = ((double)i - centerBin) / sigma;
+        const double d2 = d * d;
+        const float shape = (float)(qExp(-d2 / 2.0) * (1.0 - d2 / 6.0 + d2 * d2 / 120.0));
+        const float value = -95.0f + (peakDbm + 95.0f) * qMax(0.0f, shape);
+        bins[i] = qMax(bins[i], value + randomFloat(-0.8f, 0.8f));
+    }
+}
+
+/**
+ * @brief 添加OFDM帧信号
+ * 
+ * 模拟正交频分复用（OFDM）信号的频谱特征：
+ * - 整体呈近似矩形的频谱形状（OFDM的主瓣叠加）
+ * - 内部有轻微的子载波波动（梳状谱特征）
+ * - 频谱边缘有滚降（根升余弦滤波器效果）
+ * - 功率谱密度相对平坦
+ * 
+ * OFDM是现代无人机图传的主流调制方式（如5.8GHz高清图传）。
+ * 
+ * @param bins 频谱数据数组（输入/输出）
+ * @param centerBin 信号中心频点位置
+ * @param widthBins 信号带宽（以频点为单位）
+ * @param peakDbm 信号峰值功率（dBm）
+ */
+void SpectrumSimulator::addOFDMFrame(QVector<float> &bins, double centerBin, double widthBins, float peakDbm) const
+{
+    const double halfWidth = widthBins / 2.0;
+    const double rolloffWidth = widthBins * 0.12;
+    
+    for (int i = 0; i < bins.size(); ++i) {
+        const double distance = qAbs((double)i - centerBin);
+        
+        if (distance <= halfWidth + rolloffWidth) {
+            double power = 0.0;
+            
+            if (distance <= halfWidth) {
+                power = 0.95 + randomFloat(-0.08f, 0.08f);
+            } else {
+                const double edge = (halfWidth + rolloffWidth - distance) / rolloffWidth;
+                power = (0.95 + randomFloat(-0.08f, 0.08f)) * edge * edge;
+            }
+            
+            const float value = -95.0f + (peakDbm + 95.0f) * (float)power;
+            bins[i] = qMax(bins[i], value + randomFloat(-1.5f, 1.5f));
+        }
     }
 }
 

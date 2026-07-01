@@ -18,3 +18,6 @@ HEADERS += \
     spectrumanalyzer.h \
     spectrumplotwidget.h \
     waterfallwidget.h
+
+FORMS += \
+    mainwindow.ui

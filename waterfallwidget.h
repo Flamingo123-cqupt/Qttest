@@ -63,6 +63,26 @@ public:
      */
     void clear();
 
+    /**
+     * @brief 设置框选区域
+     * 
+     * 设置频谱图中框选的频率范围，瀑布图将在对应位置显示框选标记。
+     * 
+     * @param startFreqMHz 起始频率（MHz）
+     * @param endFreqMHz 结束频率（MHz）
+     */
+    void setSelection(double startFreqMHz, double endFreqMHz);
+    
+    /**
+     * @brief 设置缩放范围
+     * 
+     * 设置频率显示范围，与频谱图的缩放保持同步。
+     * 
+     * @param startFreqMHz 起始频率（MHz）
+     * @param endFreqMHz 结束频率（MHz）
+     */
+    void setZoomRange(double startFreqMHz, double endFreqMHz);
+
 protected:
     /**
      * @brief 绘制事件处理
@@ -110,6 +130,11 @@ private:
     bool m_hasFrame;          ///< 是否有有效的帧数据
     float m_minDbm;           ///< 功率显示范围最小值（dBm）
     float m_maxDbm;           ///< 功率显示范围最大值（dBm）
+    double m_selectionStartMHz; ///< 框选起始频率（MHz）
+    double m_selectionEndMHz;   ///< 框选结束频率（MHz）
+    double m_zoomStartMHz;      ///< 缩放起始频率（MHz）
+    double m_zoomEndMHz;        ///< 缩放结束频率（MHz）
+    bool m_isZoomed;            ///< 是否处于缩放状态
 };
 
 #endif // WATERFALLWIDGET_H

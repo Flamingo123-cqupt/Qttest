@@ -98,6 +98,57 @@ public:
      */
     double binToFreqMHz(int bin) const;
 
+    /**
+     * @brief 设置中心频率
+     * 
+     * @param centerFreqMHz 中心频率，单位 MHz
+     */
+    void setCenterFreqMHz(double centerFreqMHz);
+
+    /**
+     * @brief 获取中心频率
+     * 
+     * @return 中心频率，单位 MHz
+     */
+    double centerFreqMHz() const;
+
+    /**
+     * @brief 设置分析带宽
+     * 
+     * @param spanMHz 分析带宽，单位 MHz
+     */
+    void setSpanMHz(double spanMHz);
+
+    /**
+     * @brief 获取分析带宽
+     * 
+     * @return 分析带宽，单位 MHz
+     */
+    double spanMHz() const;
+
+    /**
+     * @brief 设置起始频率
+     * 
+     * 起始频率改变时，自动调整中心频率以保持带宽不变
+     * 
+     * @param startFreqMHz 起始频率，单位 MHz
+     */
+    void setStartFreqMHz(double startFreqMHz);
+
+    /**
+     * @brief 获取起始频率
+     * 
+     * @return 起始频率，单位 MHz
+     */
+    double startFreqMHz() const;
+
+    /**
+     * @brief 获取结束频率
+     * 
+     * @return 结束频率，单位 MHz
+     */
+    double endFreqMHz() const;
+
 private:
     /**
      * @brief 添加高斯噪声到频谱数据
@@ -119,6 +170,30 @@ private:
      * @param peakDbm 信号峰值功率（dBm）
      */
     void addGaussianSignal(QVector<float> &bins, double centerBin, double widthBins, float peakDbm) const;
+
+    /**
+     * @brief 添加GFSK调制信号
+     * 
+     * 模拟高斯频移键控（GFSK）信号的频谱特征，适合模拟遥控信号。
+     * 
+     * @param bins 频谱数据数组（输入/输出）
+     * @param centerBin 信号中心频点位置
+     * @param widthBins 信号带宽（以频点为单位）
+     * @param peakDbm 信号峰值功率（dBm）
+     */
+    void addGFSKSignal(QVector<float> &bins, double centerBin, double widthBins, float peakDbm) const;
+
+    /**
+     * @brief 添加OFDM帧信号
+     * 
+     * 模拟正交频分复用（OFDM）信号的频谱特征，适合模拟宽带图传信号。
+     * 
+     * @param bins 频谱数据数组（输入/输出）
+     * @param centerBin 信号中心频点位置
+     * @param widthBins 信号带宽（以频点为单位）
+     * @param peakDbm 信号峰值功率（dBm）
+     */
+    void addOFDMFrame(QVector<float> &bins, double centerBin, double widthBins, float peakDbm) const;
 
     /**
      * @brief 添加平顶形状的信号

@@ -23,9 +23,15 @@ SpectrumPlotWidget::SpectrumPlotWidget(QWidget *parent)
     , m_hasFrame(false)          // 默认无帧数据
     , m_minDbm(-100.0f)          // 功率范围最小值：-100dBm
     , m_maxDbm(-35.0f)           // 功率范围最大值：-35dBm
+    , m_mouseInWidget(false)     // 默认鼠标不在控件内
+    , m_isZoomed(false)          // 默认未缩放
+    , m_isSelecting(false)       // 默认未框选
+    , m_selectedStartMHz(0.0)    // 默认选中起始频率
+    , m_selectedEndMHz(0.0)      // 默认选中结束频率
 {
     setMinimumHeight(230);       // 设置最小高度
     setAutoFillBackground(false); // 禁用自动背景填充（手动绘制）
+    setMouseTracking(true);      // 启用鼠标跟踪
 }
 
 /**
@@ -67,6 +73,13 @@ void SpectrumPlotWidget::setFrame(const SpectrumFrame &frame, const DetectionRes
 void SpectrumPlotWidget::clear()
 {
     m_hasFrame = false;
+    m_isZoomed = false;          // 重置缩放状态
+    m_isSelecting = false;       // 重置框选状态
+    m_selectedStartMHz = 0.0;    // 重置选中频率
+    m_selectedEndMHz = 0.0;
+    m_zoomStartMHz = 0.0;
+    m_zoomEndMHz = 0.0;
+    emit zoomChanged(0.0, 0.0);
     update();  // 触发重绘
 }
 
@@ -109,13 +122,15 @@ void SpectrumPlotWidget::paintEvent(QPaintEvent *event)
     drawGrid(painter, plotRect);           // 绘制网格和坐标轴
     drawSpectrum(painter, plotRect);       // 绘制频谱曲线
     drawDetectionMarker(painter, plotRect); // 绘制检测标记
+    drawSelection(painter, plotRect);      // 绘制框选区域
+    drawMouseCursor(painter, plotRect);    // 绘制鼠标悬浮光标和标签
 }
 
 /**
  * @brief 将频点数据转换为绘图坐标
  * 
  * 根据频点索引和功率值，计算在绘图区域中的坐标位置：
- * - X坐标：频点索引线性映射到绘图区域宽度
+ * - X坐标：频点索引线性映射到绘图区域宽度，支持缩放
  * - Y坐标：功率值线性映射到绘图区域高度（功率越高Y坐标越小）
  * 
  * @param plotRect 绘图区域矩形
@@ -127,8 +142,17 @@ QPointF SpectrumPlotWidget::pointForBin(const QRect &plotRect, int bin, float db
 {
     const int count = m_frame.powerDbm.size();
     
-    // 计算X轴比例（频点索引 / 总频点数）
-    const double xRatio = (count > 1) ? (double)bin / (double)(count - 1) : 0.0;
+    double xRatio;
+    if (m_isZoomed) {
+        const double totalSpan = m_frame.spanMHz;
+        const double binFreq = m_frame.centerFreqMHz - totalSpan / 2.0 + (double)bin * totalSpan / (double)(count - 1);
+        const double zoomSpan = m_zoomEndMHz - m_zoomStartMHz;
+        xRatio = (binFreq - m_zoomStartMHz) / zoomSpan;
+    } else {
+        xRatio = (count > 1) ? (double)bin / (double)(count - 1) : 0.0;
+    }
+    
+    xRatio = qBound(0.0, xRatio, 1.0);
     
     // 计算Y轴比例（(功率 - 最小值) / (最大值 - 最小值)），限制在0-1之间
     const double yRatio = qBound(0.0, ((double)dbm - (double)m_minDbm) / ((double)m_maxDbm - (double)m_minDbm), 1.0);
@@ -186,11 +210,19 @@ void SpectrumPlotWidget::drawGrid(QPainter &painter, const QRect &plotRect) cons
 
     // 绘制X轴频率标签（如果有帧数据）
     if (m_hasFrame) {
-        const double startMHz = m_frame.centerFreqMHz - m_frame.spanMHz / 2.0;
-        const double endMHz = m_frame.centerFreqMHz + m_frame.spanMHz / 2.0;
+        double startMHz, endMHz, centerFreqMHz;
+        if (m_isZoomed) {
+            startMHz = m_zoomStartMHz;
+            endMHz = m_zoomEndMHz;
+            centerFreqMHz = (startMHz + endMHz) / 2.0;
+        } else {
+            startMHz = m_frame.centerFreqMHz - m_frame.spanMHz / 2.0;
+            endMHz = m_frame.centerFreqMHz + m_frame.spanMHz / 2.0;
+            centerFreqMHz = m_frame.centerFreqMHz;
+        }
         
         painter.drawText(plotRect.left(), height() - 10, QString::number(startMHz, 'f', 1) + QStringLiteral(" MHz"));
-        painter.drawText(plotRect.center().x() - 42, height() - 10, QString::number(m_frame.centerFreqMHz, 'f', 1) + QStringLiteral(" MHz"));
+        painter.drawText(plotRect.center().x() - 42, height() - 10, QString::number(centerFreqMHz, 'f', 1) + QStringLiteral(" MHz"));
         painter.drawText(plotRect.right() - 78, height() - 10, QString::number(endMHz, 'f', 1) + QStringLiteral(" MHz"));
     }
 
@@ -320,4 +352,325 @@ void SpectrumPlotWidget::drawDetectionMarker(QPainter &painter, const QRect &plo
     painter.drawText(plotRect.adjusted(8, 6, -8, -6), Qt::AlignTop | Qt::AlignRight, text);
 
     painter.restore();
+}
+
+void SpectrumPlotWidget::drawMouseCursor(QPainter &painter, const QRect &plotRect) const
+{
+    if (!m_mouseInWidget || !m_hasFrame || m_frame.powerDbm.isEmpty()) {
+        return;
+    }
+
+    if (m_mousePos.x() < plotRect.left() || m_mousePos.x() > plotRect.right() ||
+        m_mousePos.y() < plotRect.top() || m_mousePos.y() > plotRect.bottom()) {
+        return;
+    }
+
+    const int count = m_frame.powerDbm.size();
+    const double xRatio = (double)(m_mousePos.x() - plotRect.left()) / (double)plotRect.width();
+    
+    int bin;
+    double freqMHz;
+    if (m_isZoomed) {
+        const double totalSpan = m_frame.spanMHz;
+        freqMHz = m_zoomStartMHz + xRatio * (m_zoomEndMHz - m_zoomStartMHz);
+        const double binPos = (freqMHz - (m_frame.centerFreqMHz - totalSpan / 2.0)) / totalSpan * (count - 1);
+        bin = qBound(0, (int)binPos, count - 1);
+    } else {
+        bin = qBound(0, (int)(xRatio * (count - 1)), count - 1);
+        const double startMHz = m_frame.centerFreqMHz - m_frame.spanMHz / 2.0;
+        freqMHz = startMHz + xRatio * m_frame.spanMHz;
+    }
+    
+    const float dbm = m_frame.powerDbm.at(bin);
+
+    painter.save();
+
+    painter.setPen(QPen(QColor(180, 180, 180), 1, Qt::DashLine));
+    painter.drawLine(QPointF(m_mousePos.x(), plotRect.top()), QPointF(m_mousePos.x(), plotRect.bottom()));
+
+    const QPointF dataPoint = pointForBin(plotRect, bin, dbm);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(255, 200, 100));
+    painter.drawEllipse(dataPoint, 3.5, 3.5);
+
+    QString tooltip = QStringLiteral("频率: %1 MHz\n幅度: %2 dBm")
+            .arg(freqMHz, 0, 'f', 2)
+            .arg(dbm, 0, 'f', 1);
+
+    QFont font = painter.font();
+    font.setPointSize(9);
+    font.setBold(true);
+    painter.setFont(font);
+
+    QFontMetrics fm(font);
+    const int textWidth = fm.width(tooltip) + 12;
+    const int textHeight = fm.height() * 2 + 8;
+
+    int tooltipX = m_mousePos.x() + 12;
+    int tooltipY = m_mousePos.y() - textHeight - 4;
+
+    if (tooltipX + textWidth > width()) {
+        tooltipX = m_mousePos.x() - textWidth - 12;
+    }
+    if (tooltipY < 0) {
+        tooltipY = m_mousePos.y() + 12;
+    }
+
+    const QRect tooltipRect(tooltipX, tooltipY, textWidth, textHeight);
+
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(25, 30, 40, 220));
+    painter.drawRoundedRect(tooltipRect, 4, 4);
+
+    painter.setPen(QColor(200, 210, 230));
+    painter.drawText(tooltipRect.adjusted(6, 4, -6, -4), tooltip);
+
+    painter.restore();
+}
+
+void SpectrumPlotWidget::drawSelection(QPainter &painter, const QRect &plotRect) const
+{
+    if (!m_hasFrame || m_frame.powerDbm.isEmpty()) {
+        return;
+    }
+
+    const int topMargin = 28;
+    const int bottomMargin = 36;
+
+    QRect selectionRect;
+    double startFreqMHz, endFreqMHz;
+
+    if (m_isSelecting) {
+        const int x1 = qMin(m_selectionStart.x(), m_selectionEnd.x());
+        const int x2 = qMax(m_selectionStart.x(), m_selectionEnd.x());
+        selectionRect = QRect(x1, plotRect.top(), x2 - x1, plotRect.height());
+        
+        const double xRatio1 = (double)(x1 - plotRect.left()) / (double)plotRect.width();
+        const double xRatio2 = (double)(x2 - plotRect.left()) / (double)plotRect.width();
+        
+        if (m_isZoomed) {
+            startFreqMHz = m_zoomStartMHz + xRatio1 * (m_zoomEndMHz - m_zoomStartMHz);
+            endFreqMHz = m_zoomStartMHz + xRatio2 * (m_zoomEndMHz - m_zoomStartMHz);
+        } else {
+            const double totalSpan = m_frame.spanMHz;
+            const double globalStart = m_frame.centerFreqMHz - totalSpan / 2.0;
+            startFreqMHz = globalStart + xRatio1 * totalSpan;
+            endFreqMHz = globalStart + xRatio2 * totalSpan;
+        }
+    } else if (m_selectedStartMHz != m_selectedEndMHz) {
+        double xRatio1, xRatio2;
+        if (m_isZoomed) {
+            xRatio1 = (m_selectedStartMHz - m_zoomStartMHz) / (m_zoomEndMHz - m_zoomStartMHz);
+            xRatio2 = (m_selectedEndMHz - m_zoomStartMHz) / (m_zoomEndMHz - m_zoomStartMHz);
+        } else {
+            const double totalSpan = m_frame.spanMHz;
+            const double globalStart = m_frame.centerFreqMHz - totalSpan / 2.0;
+            xRatio1 = (m_selectedStartMHz - globalStart) / totalSpan;
+            xRatio2 = (m_selectedEndMHz - globalStart) / totalSpan;
+        }
+        
+        xRatio1 = qBound(0.0, xRatio1, 1.0);
+        xRatio2 = qBound(0.0, xRatio2, 1.0);
+        
+        const int x1 = plotRect.left() + (int)(xRatio1 * plotRect.width());
+        const int x2 = plotRect.left() + (int)(xRatio2 * plotRect.width());
+        selectionRect = QRect(x1, plotRect.top(), x2 - x1, plotRect.height());
+        
+        startFreqMHz = m_selectedStartMHz;
+        endFreqMHz = m_selectedEndMHz;
+    } else {
+        return;
+    }
+
+    if (selectionRect.width() < 5) {
+        return;
+    }
+
+    painter.save();
+
+    painter.setPen(QPen(QColor(255, 180, 60), 1.5));
+    painter.setBrush(QColor(255, 180, 60, 30));
+    painter.drawRect(selectionRect);
+
+    painter.setPen(QColor(255, 180, 60));
+    QFont font = painter.font();
+    font.setPointSize(9);
+    font.setBold(true);
+    painter.setFont(font);
+
+    const double spanMHz = qAbs(endFreqMHz - startFreqMHz);
+    
+    QString label = QStringLiteral("带宽: %1 MHz").arg(spanMHz, 0, 'f', 1);
+
+    QFontMetrics fm(font);
+    const int textWidth = fm.width(label) + 12;
+    const int textHeight = fm.height() + 8;
+
+    int labelX = selectionRect.center().x() - textWidth / 2;
+    int labelY = selectionRect.top() - textHeight - 4;
+
+    if (labelX < plotRect.left()) {
+        labelX = plotRect.left();
+    }
+    if (labelX + textWidth > plotRect.right()) {
+        labelX = plotRect.right() - textWidth;
+    }
+    if (labelY < topMargin) {
+        labelY = selectionRect.bottom() + 4;
+    }
+    if (labelY + textHeight > height() - bottomMargin) {
+        labelY = selectionRect.top() - textHeight - 4;
+    }
+
+    const QRect labelRect(labelX, labelY, textWidth, textHeight);
+
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(25, 30, 40, 230));
+    painter.drawRoundedRect(labelRect, 4, 4);
+
+    painter.setPen(QColor(255, 180, 60));
+    painter.drawText(labelRect.adjusted(6, 4, -6, -4), label);
+
+    painter.restore();
+}
+
+void SpectrumPlotWidget::mousePressEvent(QMouseEvent *event)
+{
+    if (event->button() != Qt::LeftButton) {
+        return;
+    }
+
+    const QRect plotRect(62, 28,
+                         qMax(1, width() - 62 - 18),
+                         qMax(1, height() - 28 - 36));
+
+    if (event->pos().x() < plotRect.left() || event->pos().x() > plotRect.right() ||
+        event->pos().y() < plotRect.top() || event->pos().y() > plotRect.bottom()) {
+        return;
+    }
+
+    m_isSelecting = true;
+    m_selectionStart = event->pos();
+    m_selectionEnd = event->pos();
+    update();
+}
+
+void SpectrumPlotWidget::mouseMoveEvent(QMouseEvent *event)
+{
+    m_mouseInWidget = true;
+    m_mousePos = event->pos();
+    
+    if (m_isSelecting) {
+        m_selectionEnd = event->pos();
+    }
+    
+    update();
+}
+
+void SpectrumPlotWidget::mouseReleaseEvent(QMouseEvent *event)
+{
+    if (event->button() != Qt::LeftButton || !m_isSelecting) {
+        return;
+    }
+
+    m_isSelecting = false;
+
+    const QRect plotRect(62, 28,
+                         qMax(1, width() - 62 - 18),
+                         qMax(1, height() - 28 - 36));
+
+    const int x1 = qMin(m_selectionStart.x(), m_selectionEnd.x());
+    const int x2 = qMax(m_selectionStart.x(), m_selectionEnd.x());
+    
+    if (x2 - x1 < 5) {
+        m_selectedStartMHz = 0.0;
+        m_selectedEndMHz = 0.0;
+        update();
+        return;
+    }
+
+    const double xRatio1 = (double)(x1 - plotRect.left()) / (double)plotRect.width();
+    const double xRatio2 = (double)(x2 - plotRect.left()) / (double)plotRect.width();
+
+    if (m_isZoomed) {
+        m_selectedStartMHz = m_zoomStartMHz + xRatio1 * (m_zoomEndMHz - m_zoomStartMHz);
+        m_selectedEndMHz = m_zoomStartMHz + xRatio2 * (m_zoomEndMHz - m_zoomStartMHz);
+    } else {
+        const double totalSpan = m_frame.spanMHz;
+        const double globalStart = m_frame.centerFreqMHz - totalSpan / 2.0;
+        m_selectedStartMHz = globalStart + xRatio1 * totalSpan;
+        m_selectedEndMHz = globalStart + xRatio2 * totalSpan;
+    }
+
+    emit selectionChanged(m_selectedStartMHz, m_selectedEndMHz);
+    
+    update();
+}
+
+void SpectrumPlotWidget::leaveEvent(QEvent *event)
+{
+    Q_UNUSED(event);
+    m_mouseInWidget = false;
+    update();
+}
+
+void SpectrumPlotWidget::wheelEvent(QWheelEvent *event)
+{
+    if (!m_hasFrame || m_frame.powerDbm.isEmpty()) {
+        return;
+    }
+
+    const QRect plotRect(62, 28,
+                         qMax(1, width() - 62 - 18),
+                         qMax(1, height() - 28 - 36));
+
+    if (event->pos().x() < plotRect.left() || event->pos().x() > plotRect.right()) {
+        return;
+    }
+
+    const double xRatio = (event->pos().x() - plotRect.left()) / (double)plotRect.width();
+    const double totalSpan = m_frame.spanMHz;
+    
+    double currentStartMHz, currentEndMHz;
+    if (m_isZoomed) {
+        currentStartMHz = m_zoomStartMHz;
+        currentEndMHz = m_zoomEndMHz;
+    } else {
+        currentStartMHz = m_frame.centerFreqMHz - totalSpan / 2.0;
+        currentEndMHz = m_frame.centerFreqMHz + totalSpan / 2.0;
+    }
+
+    const double mouseFreqMHz = currentStartMHz + xRatio * (currentEndMHz - currentStartMHz);
+    
+    const double zoomFactor = event->angleDelta().y() > 0 ? 0.85 : 1.15;
+    const double minSpan = 1.0;
+    const double maxSpan = totalSpan;
+
+    double newSpan = (currentEndMHz - currentStartMHz) * zoomFactor;
+    newSpan = qBound(minSpan, newSpan, maxSpan);
+
+    const double halfSpan = newSpan / 2.0;
+    double newStart = mouseFreqMHz - halfSpan * xRatio * 2.0;
+    double newEnd = mouseFreqMHz + halfSpan * (1.0 - xRatio) * 2.0;
+
+    const double globalStart = m_frame.centerFreqMHz - totalSpan / 2.0;
+    const double globalEnd = m_frame.centerFreqMHz + totalSpan / 2.0;
+
+    if (newStart < globalStart) {
+        newStart = globalStart;
+        newEnd = newStart + newSpan;
+    }
+    if (newEnd > globalEnd) {
+        newEnd = globalEnd;
+        newStart = newEnd - newSpan;
+    }
+
+    m_zoomStartMHz = newStart;
+    m_zoomEndMHz = newEnd;
+    m_isZoomed = (newSpan < maxSpan * 0.95);
+
+    emit zoomChanged(m_zoomStartMHz, m_zoomEndMHz);
+
+    update();
+    event->accept();
 }

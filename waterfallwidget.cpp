@@ -23,6 +23,11 @@ WaterfallWidget::WaterfallWidget(QWidget *parent)
     , m_hasFrame(false)          // 默认无帧数据
     , m_minDbm(-100.0f)          // 功率范围最小值：-100dBm
     , m_maxDbm(-35.0f)           // 功率范围最大值：-35dBm
+    , m_selectionStartMHz(0.0)   // 默认框选起始频率
+    , m_selectionEndMHz(0.0)     // 默认框选结束频率
+    , m_zoomStartMHz(0.0)        // 默认缩放起始频率
+    , m_zoomEndMHz(0.0)          // 默认缩放结束频率
+    , m_isZoomed(false)          // 默认未缩放
 {
     setMinimumSize(640, 420);    // 设置最小尺寸
     setAutoFillBackground(false); // 禁用自动背景填充（手动绘制）
@@ -101,6 +106,39 @@ void WaterfallWidget::clear()
         m_waterfall.fill(QColor(8, 12, 18));  // 填充深黑色背景
     }
     m_hasFrame = false;
+    m_selectionStartMHz = 0.0;
+    m_selectionEndMHz = 0.0;
+    update();  // 触发重绘
+}
+
+/**
+ * @brief 设置框选区域
+ * 
+ * 设置频谱图中框选的频率范围，瀑布图将在对应位置显示框选标记。
+ * 
+ * @param startFreqMHz 起始频率（MHz）
+ * @param endFreqMHz 结束频率（MHz）
+ */
+void WaterfallWidget::setSelection(double startFreqMHz, double endFreqMHz)
+{
+    m_selectionStartMHz = startFreqMHz;
+    m_selectionEndMHz = endFreqMHz;
+    update();  // 触发重绘
+}
+
+/**
+ * @brief 设置缩放范围
+ * 
+ * 设置频率显示范围，与频谱图的缩放保持同步。
+ * 
+ * @param startFreqMHz 起始频率（MHz）
+ * @param endFreqMHz 结束频率（MHz）
+ */
+void WaterfallWidget::setZoomRange(double startFreqMHz, double endFreqMHz)
+{
+    m_zoomStartMHz = startFreqMHz;
+    m_zoomEndMHz = endFreqMHz;
+    m_isZoomed = (startFreqMHz != endFreqMHz && qAbs(endFreqMHz - startFreqMHz) < m_lastFrame.spanMHz * 0.95);
     update();  // 触发重绘
 }
 
@@ -137,9 +175,32 @@ void WaterfallWidget::paintEvent(QPaintEvent *event)
                          qMax(1, width() - leftMargin - rightMargin),
                          qMax(1, height() - topMargin - bottomMargin));
 
+    // 获取全局频率范围
+    const double globalStart = m_lastFrame.centerFreqMHz - m_lastFrame.spanMHz / 2.0;
+    const double globalEnd = m_lastFrame.centerFreqMHz + m_lastFrame.spanMHz / 2.0;
+    
+    // 根据缩放状态确定显示范围
+    double displayStart, displayEnd;
+    if (m_isZoomed) {
+        displayStart = m_zoomStartMHz;
+        displayEnd = m_zoomEndMHz;
+    } else {
+        displayStart = globalStart;
+        displayEnd = globalEnd;
+    }
+
     // 绘制瀑布图图像（如果图像有效）
-    if (!m_waterfall.isNull()) {
-        painter.drawImage(plotRect, m_waterfall);
+    if (!m_waterfall.isNull() && m_hasFrame) {
+        const double totalSpan = globalEnd - globalStart;
+        const double zoomStartRatio = (displayStart - globalStart) / totalSpan;
+        const double zoomEndRatio = (displayEnd - globalStart) / totalSpan;
+        
+        const int sourceX = (int)(zoomStartRatio * m_waterfall.width());
+        const int sourceWidth = (int)((zoomEndRatio - zoomStartRatio) * m_waterfall.width());
+        
+        if (sourceWidth > 0) {
+            painter.drawImage(plotRect, m_waterfall, QRect(sourceX, 0, sourceWidth, m_waterfall.height()));
+        }
     }
 
     // 绘制边框
@@ -158,12 +219,32 @@ void WaterfallWidget::paintEvent(QPaintEvent *event)
 
     // 绘制频率标签（X轴）
     if (m_hasFrame) {
-        const double startMHz = m_lastFrame.centerFreqMHz - m_lastFrame.spanMHz / 2.0;
-        const double endMHz = m_lastFrame.centerFreqMHz + m_lastFrame.spanMHz / 2.0;
+        const double centerFreqMHz = (displayStart + displayEnd) / 2.0;
         
-        painter.drawText(plotRect.left(), height() - 10, QString::number(startMHz, 'f', 1) + QStringLiteral(" MHz"));
-        painter.drawText(plotRect.center().x() - 42, height() - 10, QString::number(m_lastFrame.centerFreqMHz, 'f', 1) + QStringLiteral(" MHz"));
-        painter.drawText(plotRect.right() - 78, height() - 10, QString::number(endMHz, 'f', 1) + QStringLiteral(" MHz"));
+        painter.drawText(plotRect.left(), height() - 10, QString::number(displayStart, 'f', 1) + QStringLiteral(" MHz"));
+        painter.drawText(plotRect.center().x() - 42, height() - 10, QString::number(centerFreqMHz, 'f', 1) + QStringLiteral(" MHz"));
+        painter.drawText(plotRect.right() - 78, height() - 10, QString::number(displayEnd, 'f', 1) + QStringLiteral(" MHz"));
+    }
+
+    // 绘制框选区域
+    if (m_hasFrame && m_selectionStartMHz != m_selectionEndMHz) {
+        const double totalSpan = displayEnd - displayStart;
+        
+        const double startRatio = (m_selectionStartMHz - displayStart) / totalSpan;
+        const double endRatio = (m_selectionEndMHz - displayStart) / totalSpan;
+        
+        const int x1 = plotRect.left() + (int)(startRatio * plotRect.width());
+        const int x2 = plotRect.left() + (int)(endRatio * plotRect.width());
+        
+        if (qAbs(x2 - x1) >= 5) {
+            painter.save();
+            
+            painter.setPen(QPen(QColor(255, 180, 60), 1.5));
+            painter.setBrush(QColor(255, 180, 60, 20));
+            painter.drawRect(QRect(x1, plotRect.top(), x2 - x1, plotRect.height()));
+            
+            painter.restore();
+        }
     }
 }
 
