@@ -1,0 +1,11 @@
+debug/main.o
+debug/mainwindow.o
+debug/spectrumsimulator.o
+debug/spectrumanalyzer.o
+debug/spectrumplotwidget.o
+debug/waterfallwidget.o
+debug/moc_mainwindow.o
+debug/moc_spectrumsimulator.o
+debug/moc_spectrumanalyzer.o
+debug/moc_spectrumplotwidget.o
+debug/moc_waterfallwidget.o

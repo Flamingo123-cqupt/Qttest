@@ -1,0 +1,11 @@
+release/main.o
+release/mainwindow.o
+release/spectrumsimulator.o
+release/spectrumanalyzer.o
+release/spectrumplotwidget.o
+release/waterfallwidget.o
+release/moc_mainwindow.o
+release/moc_spectrumsimulator.o
+release/moc_spectrumanalyzer.o
+release/moc_spectrumplotwidget.o
+release/moc_waterfallwidget.o
